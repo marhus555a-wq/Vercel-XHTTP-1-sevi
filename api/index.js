@@ -1,8 +1,8 @@
 export const config = { runtime: "edge" };
 
-const BASE_URL = normalizeBase(process.env.TARGET_DOMAIN);
+const TARGET_BASE = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
 
-const HOP_BY_HOP = [
+const STRIP_HEADERS = new Set([
   "host",
   "connection",
   "keep-alive",
@@ -16,86 +16,47 @@ const HOP_BY_HOP = [
   "x-forwarded-host",
   "x-forwarded-proto",
   "x-forwarded-port",
-];
+]);
 
-export default async function handler(request) {
-  if (!BASE_URL) {
-    return respond("Server misconfigured", 500);
+export default async function handler(req) {
+  if (!TARGET_BASE) {
+    return new Response("Please set the new for me and others TARGET_DOMAIN,BHZ", { status: 500 });
   }
 
   try {
-    const destination = buildTargetUrl(request.url);
-    const headers = buildForwardHeaders(request.headers);
+    const pathStart = req.url.indexOf("/", 8);
+    const targetUrl =
+      pathStart === -1 ? TARGET_BASE + "/" : TARGET_BASE + req.url.slice(pathStart);
 
-    const init = createRequestInit(request, headers);
+    const out = new Headers();
+    let clientIp = null;
+    for (const [k, v] of req.headers) {
+      if (STRIP_HEADERS.has(k)) continue;
+      if (k.startsWith("x-vercel-")) continue;
+      if (k === "x-real-ip") {
+        clientIp = v;
+        continue;
+      }
+      if (k === "x-forwarded-for") {
+        if (!clientIp) clientIp = v;
+        continue;
+      }
+      out.set(k, v);
+    }
+    if (clientIp) out.set("x-forwarded-for", clientIp);
 
-    const response = await fetch(destination, init);
-    return response;
-  } catch (e) {
-    console.error("[edge-relay]", e);
-    return respond("Upstream error", 502);
+    const method = req.method;
+    const hasBody = method !== "GET" && method !== "HEAD";
+
+    return await fetch(targetUrl, {
+      method,
+      headers: out,
+      body: hasBody ? req.body : undefined,
+      duplex: "half",
+      redirect: "manual",
+    });
+  } catch (err) {
+    console.error("relay error:", err);
+    return new Response("vaqean in che vaze tunnele k fail shode", { status: 502 });
   }
-}
-
-/* ---------------- utils ---------------- */
-
-function normalizeBase(input) {
-  if (!input) return "";
-  return input.endsWith("/") ? input.slice(0, -1) : input;
-}
-
-function buildTargetUrl(originalUrl) {
-  const pathIndex = originalUrl.indexOf("/", 8);
-  const path = pathIndex === -1 ? "/" : originalUrl.substring(pathIndex);
-  return BASE_URL + path;
-}
-
-function buildForwardHeaders(incoming) {
-  const result = new Headers();
-  let ip = extractClientIp(incoming);
-
-  for (const [key, value] of incoming.entries()) {
-    if (shouldSkipHeader(key)) continue;
-    result.set(key, value);
-  }
-
-  if (ip) {
-    result.set("x-forwarded-for", ip);
-  }
-
-  return result;
-}
-
-function shouldSkipHeader(name) {
-  return (
-    HOP_BY_HOP.includes(name) ||
-    name.startsWith("x-vercel-") ||
-    name === "x-real-ip" ||
-    name === "x-forwarded-for"
-  );
-}
-
-function extractClientIp(headers) {
-  return (
-    headers.get("x-real-ip") ||
-    headers.get("x-forwarded-for") ||
-    null
-  );
-}
-
-function createRequestInit(req, headers) {
-  const method = req.method;
-  const allowBody = !["GET", "HEAD"].includes(method);
-
-  return {
-    method,
-    headers,
-    body: allowBody ? req.body : undefined,
-    duplex: "half",
-    redirect: "manual",
-  };
-}
-
-function respond(message, status = 200) {
-  return new Response(message, { status });
 }
