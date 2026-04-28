@@ -1,71 +1,101 @@
-//this is new code
-
 export const config = { runtime: "edge" };
 
-const BASE = cleanBase(process.env.TARGET_DOMAIN);
+const BASE_URL = normalizeBase(process.env.TARGET_DOMAIN);
 
-export default async function handler(req) {
-  if (!BASE) {
-    return new Response("Missing TARGET_DOMAIN", { status: 500 });
+const HOP_BY_HOP = [
+  "host",
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "forwarded",
+  "x-forwarded-host",
+  "x-forwarded-proto",
+  "x-forwarded-port",
+];
+
+export default async function handler(request) {
+  if (!BASE_URL) {
+    return respond("Server misconfigured", 500);
   }
 
   try {
-    const url = resolveUrl(req.url);
-    const controller = new AbortController();
+    const destination = buildTargetUrl(request.url);
+    const headers = buildForwardHeaders(request.headers);
 
-    // timeout ساده
-    const timeout = setTimeout(() => controller.abort(), 10000);
+    const init = createRequestInit(request, headers);
 
-    const response = await fetch(url, {
-      method: req.method,
-      headers: forwardHeaders(req.headers),
-      body: shouldSendBody(req.method) ? req.body : undefined,
-      redirect: "manual",
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeout);
-
-    return new Response(response.body, {
-      status: response.status,
-      headers: sanitizeResponseHeaders(response.headers),
-    });
-
-  } catch (err) {
-    console.error("proxy failure:", err);
-    return new Response("Upstream request failed", { status: 502 });
+    const response = await fetch(destination, init);
+    return response;
+  } catch (e) {
+    console.error("[edge-relay]", e);
+    return respond("Upstream error", 502);
   }
 }
 
-/* helpers */
+/* ---------------- utils ---------------- */
 
-function cleanBase(input) {
-  return input ? input.replace(/\/$/, "") : "";
+function normalizeBase(input) {
+  if (!input) return "";
+  return input.endsWith("/") ? input.slice(0, -1) : input;
 }
 
-function resolveUrl(original) {
-  const idx = original.indexOf("/", 8);
-  return BASE + (idx === -1 ? "/" : original.slice(idx));
+function buildTargetUrl(originalUrl) {
+  const pathIndex = originalUrl.indexOf("/", 8);
+  const path = pathIndex === -1 ? "/" : originalUrl.substring(pathIndex);
+  return BASE_URL + path;
 }
 
-function shouldSendBody(method) {
-  return !["GET", "HEAD"].includes(method);
-}
+function buildForwardHeaders(incoming) {
+  const result = new Headers();
+  let ip = extractClientIp(incoming);
 
-function forwardHeaders(headers) {
-  const out = new Headers();
-
-  for (const [k, v] of headers.entries()) {
-    if (k.startsWith("x-vercel-")) continue;
-    if (k === "host") continue;
-    out.set(k, v);
+  for (const [key, value] of incoming.entries()) {
+    if (shouldSkipHeader(key)) continue;
+    result.set(key, value);
   }
 
-  return out;
+  if (ip) {
+    result.set("x-forwarded-for", ip);
+  }
+
+  return result;
 }
 
-function sanitizeResponseHeaders(headers) {
-  const out = new Headers(headers);
-  out.delete("content-encoding"); // جلوگیری از مشکلات edge
-  return out;
+function shouldSkipHeader(name) {
+  return (
+    HOP_BY_HOP.includes(name) ||
+    name.startsWith("x-vercel-") ||
+    name === "x-real-ip" ||
+    name === "x-forwarded-for"
+  );
+}
+
+function extractClientIp(headers) {
+  return (
+    headers.get("x-real-ip") ||
+    headers.get("x-forwarded-for") ||
+    null
+  );
+}
+
+function createRequestInit(req, headers) {
+  const method = req.method;
+  const allowBody = !["GET", "HEAD"].includes(method);
+
+  return {
+    method,
+    headers,
+    body: allowBody ? req.body : undefined,
+    duplex: "half",
+    redirect: "manual",
+  };
+}
+
+function respond(message, status = 200) {
+  return new Response(message, { status });
 }
