@@ -1,4 +1,4 @@
-#thisisnewcode
+//this is new code
 
 export const config = { runtime: "edge" };
 
